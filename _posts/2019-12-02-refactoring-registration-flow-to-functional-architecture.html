@@ -1382,4 +1382,86 @@ image_alt: "A flowchart describing the workflow for completing a registration."
 	    </div>
 	    <div class="comment-date">2019-12-12 15:02 UTC</div>
 	</div>
+
+        <div class="comment" id="78c57ebc75f0498381c5555c7fb8aa36">
+	    <div class="comment-author"><a href="https://github.com/DunetsNM">Nick Dunets</a></div>
+	    <div class="comment-content">
+	    	<p>
+	    		Speaking of examples where pure-impure-pure sandwich where non-trivial logic still leaks to impure code. I have a large workflow in F# which I managed to refactor from DI style to Impure-Pure-Impure sandwich following similar refactoring techniques. However I did that before I learnt enough about Free monads and now wonder if Free monads would be a better fit. 
+	    	</p>
+	    	<p>
+	    		On the very high level workflow looks like this:
+	    	</p>
+		<ul>
+			<li>
+			opening impure part receives request that manifests desired state of a list of entities, and loads actual state of those entities (if there any)
+			</li>
+			<li>
+			pure part compares desired and actual state of entities and returns the list of "diffs" that need to be written to database to reach desired state. 1000+ LoC without type declarations
+			</li>
+			<li>
+			Closing impure part writes those events to the database. 1200+ LoC (mostly due to lots of raw SQL used via FSharp.Data.SqlClient) but very simple in terms of cyclomatic complexity
+			</li>
+		</ul>
+	    	<p>
+	    		However despite of being mostly straightforward, closing impure block still has some subtleties which are not (unit)tested and probably can't be?
+	    	</p>
+	    	<p>
+	    		Here's the thing. For the sake of discussion I'll take just one entity that is called Accrual (there are more types of entities in request). Accrual entity in points to a StockItem entity (steel product in my case). Accruals can be written for two kinds of Stock Items:
+	    	</p>
+	    	
+		<ul>
+			<li>
+				PermanentStockItem - This stock item can be pointed by multiple Accruals (from different requests), e.g. steel bars of standard lengths such as 3 meters. Such Stock Item is created externally and not owned by anyone.
+			</li>
+			<li>
+				TransientStockItem - This stock item is owned by and filled only once by this very Accrual / can't be refilled (e.g. offcut of steel of non-standard size like 1.23 meters). It should be deleted if it's orphaned i.e. when accrual switches to a permanent stock item
+			</li>					
+		</ul>
+		<p>
+	    		Diff of logic of Accrual's Stock Item is intuitive and looks like this (again, simplified):
+	    	</p>
+		<p>
+			<table>
+<tr><th>Current</th><th>Requested</th><th>Stock Item Diff</th></tr>
+<tr><td>None</td><td>Permanent</td><td>SetPermanent of PermanentStockItem</td></tr>
+<tr><td>None</td><td>Transient</td><td>CreateTransient of TransientStockItem</td></tr>
+<tr><td>Permanent</td><td>Permanent(same)</td><td>Unchanged of StockItem // StockItem is a discriminated union of permanent and transient</td></tr>
+<tr><td>Permanent</td><td>Permanent(different)</td><td>SetPermanent of PermanentStockItem</td></tr>
+<tr><td>Permanent</td><td>Transient</td><td>CreateTransient	of TransientStockItem</td></tr>
+<tr><td>Transient</td><td>Transient(same)</td><td>Unchanged of StockItem</td></tr>
+<tr><td>Transient</td><td>Transient(different)</td><td>UpdateTransient of TransientStockItem</td></tr>
+<tr><td>Transient</td><td>Permanent</td><td>SwitchToPermanentDeleteTransient of (PermanentStockItem * TransientStockItem)</td></tr>
+</table>
+		    </p>
+	    	<p>
+	    		SwitchToPermanentDeleteTransient is where things get tricky in the impure part. This is how I need to write a diff of Accrual to the SQL database, mind you that I use FK constraints and autoincrement int PK columns populated on SQL side, 
+so order of writes is very important:
+	    	</p>
+		<ul>
+			<li>
+				First, Stock Item Diff is written to dbo.StockItem table - except the Delete Transient bit of it (otherwise FK violation will be thrown because Accrual row still points to it)
+			</li>
+			<li>
+				Second, other updated Accrual fields written to dbo.Accrual table (Accrual can't be written first, because FK to a new TransientStockItem Id would't be assigned)
+			</li>
+			<li>
+				Third, orphaned Transient Stock Item (if there is one) deleted from dbo.StockItem table
+			</li>
+		</ul>
+		<p>
+			It's rather easy to mess this logic up  - which I did few times before getting it right, so I feel a bit uncomfortable that it resides in impure i.e. non-(unit)-testable part of my code. In theory it can be simpler if I use client-generated Guids for PK but this is how it is now.
+		</p>
+		<p>
+			What I wonder is, whether whole workflow would benefit if it was represented as a Free monad with specific low-level "diff writes" interpreted further in composition root. They would be scattered here and there like needles in a haystack but monadic bind would make it obvious that order of how things are written is very important and this logic would belong to the pure part.
+		</p>
+		<p>
+			From the other hand it actually seems good that I don't pollute decision making with intricacies of effectful persistence? "Sandwich" approach can be beneficial if underlying data source becomes less sensitive to order of writes, or if I need to support multiple. Also keeping all writes consolidated in closing impure block makes it easy to fiddle with granularity of db transaction scopes.
+		</p>
+		<p>
+			Or am I still missing something and can actually take take best of both approaches?
+		</p>
+	    </div>
+	    <div class="comment-date">2019-12-17 06:23:29 UTC</div>
+	</div>
 </div>
